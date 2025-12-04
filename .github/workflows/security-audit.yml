@@ -1,0 +1,75 @@
+name: Security - npm audit
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+    branches:
+      - '**'
+
+permissions:
+  contents: write
+
+jobs:
+  npm-audit:
+    name: Run npm audit and auto-fix
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies (if present)
+        run: |
+          if [ -f package.json ]; then
+            npm ci
+          else
+            echo "No package.json — skipping install."
+            exit 0
+          fi
+
+      - name: Save npm audit output
+        run: |
+          npm audit --audit-level=moderate --json > audit.json || true
+
+      - name: Count moderate+ vulnerabilities
+        id: count_vulns
+        run: |
+          node -e "const fs=require('fs'); try{const a=JSON.parse(fs.readFileSync('audit.json','utf8')); const m=(a.metadata && a.metadata.vulnerabilities)? Object.values(a.metadata.vulnerabilities).reduce((s,n)=>s+n,0):0; console.log('vulns='+m);}catch(e){console.log('vulns=0')}" | tee vuln.txt
+
+      - name: Run npm audit fix if vulnerabilities found
+        run: |
+          V=$(node -e "const fs=require('fs'); try{const a=JSON.parse(fs.readFileSync('audit.json','utf8')); const m=(a.metadata && a.metadata.vulnerabilities)? Object.values(a.metadata.vulnerabilities).reduce((s,n)=>s+n,0):0; console.log(m);}catch(e){console.log(0)}")
+          if [ "$V" -gt 0 ]; then
+            echo "Found $V vulnerabilities >= moderate. Running npm audit fix..."
+            npm audit fix || true
+            if ! git diff --quiet; then
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git add -A || true
+              git commit -m "chore: fix vulnerabilities via npm audit fix [skip ci]" || true
+              git push || true
+            else
+              echo "No lockfile or package changes after npm audit fix."
+            fi
+          else
+            echo "No vulnerabilities >= moderate found."
+          fi
+
+      - name: Re-run npm audit and fail on remaining moderate+
+        run: |
+          npm audit --audit-level=moderate --json > audit_after.json || true
+          R=$(node -e "const fs=require('fs'); try{const a=JSON.parse(fs.readFileSync('audit_after.json','utf8')); const m=(a.metadata && a.metadata.vulnerabilities)? Object.values(a.metadata.vulnerabilities).reduce((s,n)=>s+n,0):0; console.log(m);}catch(e){console.log(0)}")
+          echo "Remaining moderate+ vulnerabilities: $R"
+          if [ "$R" -gt 0 ]; then
+            echo "Vulnerabilities remain (>= moderate). Failing job." && exit 1
+          else
+            echo "All moderate+ vulnerabilities resolved."
+          fi
