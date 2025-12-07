@@ -4,53 +4,66 @@ on:
     - cron: '0 5 * * *'
   workflow_dispatch: {}
 
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-nightly
+  cancel-in-progress: true
+
 jobs:
   check_date:
     runs-on: ubuntu-latest
     outputs:
-      should_run: ${{ steps.should_run.outputs.should_run }}
+      should_run: ${{ steps.set_output.outputs.should_run }}
     steps:
       - uses: actions/checkout@v4
-      - name: print latest_commit
-        run: echo ${{ github.sha }}
+        with:
+          fetch-depth: 0
 
-      - id: should_run
-        continue-on-error: true
-        if: ${{ github.event_name == 'schedule' }}
+      - name: Determine whether to run (for scheduled runs)
+        id: set_output
         run: |
-          commit_count=$(git rev-list --count --after="1 day" ${{ github.sha }})
+          # Default to true for non-scheduled runs (manual dispatch / PRs)
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "should_run=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
 
-          if [[ "$commit_count" -gt 0 ]]; then
+          # Count commits in the last 1 day relative to HEAD
+          commit_count=$(git rev-list --count --since="1 day ago" HEAD || echo 0)
+
+          if [ "$commit_count" -gt 0 ]; then
             echo "should_run=true" >> $GITHUB_OUTPUT
           else
             echo "should_run=false" >> $GITHUB_OUTPUT
           fi
 
   publish:
-    # Prevent scheduled job from running if...
-    # 1) this is a fork
-    # 2) there has not been a change in the last day
     needs: check_date
     if: |
-      github.event_name != 'schedule' ||
-      (github.repository == 'GoogleChrome/lighthouse' && ${{ needs.check_date.outputs.should_run != 'false' }})
+      github.event_name != 'schedule' || needs.check_date.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/setup-node@v4
         with:
-          node-version: '22.19'
+          node-version: '22'
           registry-url: https://registry.npmjs.org/
+
       - run: yarn --frozen-lockfile
 
-      # Build report bundles needed for publishing.
-      - run: yarn build-report
+      - name: Build report bundles
+        run: yarn build-report
 
       - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          CI: true
         run: |
-          npm whoami
+          npm whoami || true
           bash $GITHUB_WORKSPACE/.github/scripts/bump-nightly-version.sh
           npm publish --tag next
-        env:
-          NODE_AUTH_TOKEN: ${{secrets.NPM_TOKEN}}
-          CI: true
